@@ -129,3 +129,19 @@ rbusError_t clearTraceContext()
         /* CID-334846 missing return statement fix */
         return ret;
 }
+
+rbusError_t webpaRbusMethodInvoke(const char *methodName, rbusObject_t inParams, rbusObject_t *outParams)
+{
+        if(!isRbusInitialized())
+        {
+                WalError("Rbus not initialized in webpaRbusMethodInvoke function\n");
+                return RBUS_ERROR_NOT_INITIALIZED;
+        }
+        if(methodName == NULL || outParams == NULL)
+        {
+                WalError("Invalid arguments to webpaRbusMethodInvoke\n");
+                return RBUS_ERROR_INVALID_INPUT;
+        }
+        WalInfo("Invoking RBUS method %s synchronously\n", methodName);
+        return rbusMethod_Invoke(rbus_handle, methodName, inParams, outParams);
+}

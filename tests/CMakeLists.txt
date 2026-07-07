@@ -125,6 +125,20 @@ add_executable(test_webpa_internal test_webpa_internal.c ../source/broadband/web
 target_link_libraries (test_webpa_internal ${WEBPA_COMMON_LIBS} -llibparodus -lwdmp-c -lrbus -ldbus-1 -lccsp_common -lcunit)
 target_link_libraries (test_webpa_internal gcov -Wl,--no-as-needed )
 
+#-------------------------------------------------------------------------------
+#   test_webpa_method
+#-------------------------------------------------------------------------------
+add_test(NAME test_webpa_method COMMAND ${MEMORY_CHECK} ./test_webpa_method)
+add_executable(test_webpa_method test_webpa_method.c ../source/broadband/webpa_method.c)
+target_link_libraries (test_webpa_method ${WEBPA_COMMON_LIBS} -llibparodus -lwdmp-c -lrbus -lcunit)
+target_link_libraries (test_webpa_method gcov -Wl,--no-as-needed )
+
+#-------------------------------------------------------------------------------
+#   sample_method_provider (on-device end-to-end validation aid; needs rtrouted)
+#-------------------------------------------------------------------------------
+add_executable(sample_method_provider sample_method_provider.c)
+target_link_libraries (sample_method_provider -lrbus)
+
 # Code coverage
 
 add_custom_target(coverage

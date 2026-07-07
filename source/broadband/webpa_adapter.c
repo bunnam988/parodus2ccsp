@@ -9,6 +9,7 @@
 #include "webpa_notification.h"
 #include "webpa_internal.h"
 #include "webpa_rbus.h"
+#include "webpa_method.h"
 #ifdef FEATURE_SUPPORT_WEBCONFIG
 #include <webcfg_generic.h>
 #endif
@@ -67,7 +68,26 @@ void processRequest(char *reqPayload,char *transactionId, char **resPayload, hea
         if(reqObj != NULL)
         {
                 WalPrint("Request:> Type : %d\n",reqObj->reqType);
-                
+
+                /* A cloud method invocation arrives as a WebPA SET carrying the
+                 * reserved RDK.Operate parameter. Route it to the dedicated
+                 * method-invocation handler instead of the standard SET path. */
+                if(reqObj->reqType == SET && isMethodInvokeRequest(reqObj->u.setReq))
+                {
+                        WalInfo("Detected RDK.Operate method invocation request\n");
+                        if(req_headers != NULL && req_headers->headers[0] != NULL && req_headers->headers[1] != NULL) {
+                                setTraceContext(req_headers->headers);
+                        }
+                        handleMethodInvoke(reqObj->u.setReq, resPayload);
+                        if(res_headers != NULL) {
+                                getTraceContext(res_headers->headers);
+                        }
+                        WalPrint("Response:> Payload = %s\n", (*resPayload != NULL) ? *resPayload : "NULL");
+                        wdmp_free_req_struct(reqObj);
+                        WalPrint("************** processRequest *****************\n");
+                        return;
+                }
+
                 resObj = (res_struct *) malloc(sizeof(res_struct));
                 memset(resObj, 0, sizeof(res_struct));
                 
