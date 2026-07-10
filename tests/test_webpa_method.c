@@ -92,6 +92,26 @@ static void freeRequest(set_req_t *req)
         free(req);
 }
 
+static void freeMethodRes(res_struct *res)
+{
+        if(res == NULL)
+        {
+                return;
+        }
+        if(res->u.paramRes != NULL)
+        {
+                if(res->u.paramRes->params != NULL)
+                {
+                        free(res->u.paramRes->params[0].name);
+                        free(res->u.paramRes->params[0].value);
+                        free(res->u.paramRes->params);
+                }
+                free(res->u.paramRes);
+        }
+        free(res->retStatus);
+        memset(res, 0, sizeof(*res));
+}
+
 /* Parse a method response payload and return the decoded inner message JSON. */
 static cJSON *decodeResponse(const char *payload, int *statusCodeOut)
 {
@@ -169,9 +189,8 @@ void test_multiParameter_rejected(void)
 {
         /* Two parameters -> invalid request (-32600). */
         set_req_t *req = (set_req_t *) calloc(1, sizeof(set_req_t));
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
         req->paramCnt = 2;
         req->param = (param_t *) calloc(2, sizeof(param_t));
@@ -183,13 +202,10 @@ void test_multiParameter_rejected(void)
         req->param[1].type = WDMP_STRING;
 
         CU_ASSERT_TRUE(isMethodInvokeRequest(req));
-        handleMethodInvoke(req, &payload);
-        CU_ASSERT_PTR_NOT_NULL_FATAL(payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_FAILURE);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_INVALID_REQUEST);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_FAILURE);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
@@ -197,84 +213,71 @@ void test_jsonParseFailure(void)
 {
         /* Valid base64 but not valid JSON -> -32700. */
         set_req_t *req = buildRequest("this is not json {");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_FAILURE);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_PARSE);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_FAILURE);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
 void test_missingMethod(void)
 {
         set_req_t *req = buildRequest("{\"params\":{}}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_FAILURE);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_INVALID_REQUEST);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_FAILURE);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
 void test_destinationNotFound(void)
 {
         set_req_t *req = buildRequest("{\"method\":\"Device.NoSuch()\"}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
         g_stubRc = RBUS_ERROR_DESTINATION_NOT_FOUND;
         g_buildOut = 0;
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_FAILURE);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_METHOD_NOT_FOUND);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_ERR_METHOD_NOT_SUPPORTED);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
 void test_invalidInput(void)
 {
         set_req_t *req = buildRequest("{\"method\":\"Device.Test()\"}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
         g_stubRc = RBUS_ERROR_INVALID_INPUT;
         g_buildOut = 0;
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_INVALID_PARAMS);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_ERR_INVALID_INPUT_PARAMETER);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
 void test_internalError(void)
 {
         set_req_t *req = buildRequest("{\"method\":\"Device.Test()\"}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
         g_stubRc = RBUS_ERROR_BUS_ERROR;
         g_buildOut = 0;
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_INTERNAL);
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_FAILURE);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
@@ -282,44 +285,36 @@ void test_successResponse(void)
 {
         set_req_t *req = buildRequest(
                 "{\"method\":\"Device.Test()\",\"params\":{\"arg1\":{\"value\":\"5\",\"dataType\":1}}}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
-        cJSON *result = NULL;
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
         g_stubRc = RBUS_ERROR_SUCCESS;
         g_buildOut = 1;
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_SUCCESS);
-        result = cJSON_GetObjectItem(inner, "result");
-        CU_ASSERT_PTR_NOT_NULL_FATAL(result);
-        CU_ASSERT_PTR_NOT_NULL(cJSON_GetObjectItem(result, "status"));
-        cJSON_Delete(inner);
-        free(payload);
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_SUCCESS);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.u.paramRes);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.u.paramRes->params);
+        CU_ASSERT_STRING_EQUAL(res.u.paramRes->params[0].name, "Device.Test()");
+        freeMethodRes(&res);
         freeRequest(req);
 }
 
 void test_rspDestinationAsyncRejected(void)
 {
-        /* rspDestination present -> async request, not supported in Phase 1,
-         * rejected as an invalid request (-32600). */
-        set_req_t *req = buildRequest("{\"method\":\"Device.Test()\"}");
-        char *payload = NULL;
-        int statusCode = 0;
-        cJSON *inner = NULL;
+        /* rspDestination in operate payload indicates async mode which is
+         * not supported in Phase 1 and is rejected as invalid request. */
+        set_req_t *req = buildRequest(
+                "{\"method\":\"Device.Test()\",\"rspDestination\":\"event:csi-stream/results\"}");
+        res_struct res;
+        memset(&res, 0, sizeof(res));
 
-        req->rspDestination = strdup("event:device-status/mac/response");
         g_stubRc = RBUS_ERROR_SUCCESS;
         g_buildOut = 1;
-        handleMethodInvoke(req, &payload);
-        inner = decodeResponse(payload, &statusCode);
-        CU_ASSERT_EQUAL(statusCode, METHOD_STATUS_FAILURE);
-        CU_ASSERT_EQUAL(getErrorCode(inner), METHOD_ERR_INVALID_REQUEST);
-        cJSON_Delete(inner);
-        free(payload);
-        free(req->rspDestination);
-        req->rspDestination = NULL;
+        handleMethodInvoke(req, &res);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(res.retStatus);
+        CU_ASSERT_EQUAL(res.retStatus[0], WDMP_FAILURE);
+        freeMethodRes(&res);
         freeRequest(req);
 }
 

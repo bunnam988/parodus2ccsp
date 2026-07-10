@@ -26,28 +26,27 @@
 #define METHOD_ERR_INVALID_PARAMS          (-32602)
 #define METHOD_ERR_INTERNAL                (-32603)
 
-/* Method response statusCode values. */
-#define METHOD_STATUS_SUCCESS              200
-#define METHOD_STATUS_FAILURE              520
-
 /**
- * @brief isMethodInvokeRequest detects whether a SET request is actually a
- *        cloud method-invocation request identified by the reserved
- *        RDK.Operate parameter name.
+ * @brief isMethodInvokeRequest detects whether a SET request should be routed
+ *        to method-invocation handling.
+ *
+ * The current check is strict about shape and identifier only: the request
+ * must contain exactly one parameter and that parameter name must be
+ * RDK.Operate.
  *
  * @param[in] setReq parsed SET request
- * @return true if the request carries the RDK.Operate parameter
+ * @return true when setReq has exactly one parameter named RDK.Operate
  */
 bool isMethodInvokeRequest(set_req_t *setReq);
 
 /**
  * @brief handleMethodInvoke decodes the RDK.Operate operate payload, invokes
- *        the target RBUS method synchronously and forms the method response
- *        payload returned to the cloud.
+ *        the target RBUS method synchronously and fills the WDMP response
+ *        structure consumed by wdmp_form_response.
  *
- * @param[in]  setReq     parsed SET request carrying the RDK.Operate parameter
- * @param[out] resPayload newly-allocated response payload (caller frees)
+ * @param[in]  setReq parsed SET request carrying the RDK.Operate parameter
+ * @param[out] resObj response structure to be populated
  */
-void handleMethodInvoke(set_req_t *setReq, char **resPayload);
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj);
 
 #endif
