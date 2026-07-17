@@ -11,13 +11,14 @@
  *              result (or error) is returned to the cloud using the method
  *              response shape.
  *
- * Copyright (c) 2015  Comcast
+ * Copyright (c) 2026  Comcast
  */
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 #include <cJSON.h>
 #include <trower-base64/base64.h>
@@ -32,22 +33,29 @@
 static char *base64Decode(const char *in, size_t *outLen);
 static char *base64Encode(const char *in);
 static char *buildErrorObject(int code, const char *data);
+static char *buildErrorObjectFromJson(int code, cJSON *dataObj);
 static char *buildMethodResponse(const char *name, int statusCode, cJSON *messageObj);
 static rbusValueType_t wdmpToRbusType(int wdmpType);
-static int rbusToWdmpType(rbusValueType_t rt);
+static int mapRbusErrorToMethodError(rbusError_t rc);
 static int jsonScalarToRbusValue(cJSON *val, rbusValue_t *out);
 static int jsonLeafToRbusValue(cJSON *val, int wdmpType, rbusValue_t *out);
 static int jsonObjectToRbus(cJSON *jsonObj, rbusObject_t rbusObj);
 static cJSON *rbusValueToJson(rbusValue_t val);
 static int rbusObjectToJson(rbusObject_t obj, cJSON *jsonOut);
-static rbusHandle_t rbus_handle;
+#if 0
+static void dumpRbusObjectWithTimestamp(const char *path, const char *label,
+                const char *responseName, rbusObject_t obj);
+#endif                
+static int parseOperatePayload(set_req_t *setReq,
+                char **methodName,
+                rbusObject_t *inParams, bool *isAsync, char **errorObj);
 /*----------------------------------------------------------------------------*/
 /*                             External Functions                             */
 /*----------------------------------------------------------------------------*/
 
 bool isMethodInvokeRequest(set_req_t *setReq)
 {
-    if(setReq == NULL || setReq->param == NULL || setReq->paramCnt != 1)
+    if(setReq == NULL || setReq->param == NULL)
         return false;
 
     return (setReq->param[0].name != NULL &&
@@ -57,189 +65,73 @@ bool isMethodInvokeRequest(set_req_t *setReq)
 void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
 {
         const char *responseName = RDK_OPERATE_PARAM;
-        char *decoded = NULL;
+        char *methodName = NULL;
         char *errorObj = NULL;
         char *resultStr = NULL;
         char *b64message = NULL;
-        size_t decodedLen = 0;
-        cJSON *operateJson = NULL;
-        cJSON *methodItem = NULL;
-        cJSON *paramsItem = NULL;
-        cJSON *rspDestinationItem = NULL;
         cJSON *resultObj = NULL;
-        const char *rspDestination = NULL;
         rbusObject_t inParams = NULL;
         rbusObject_t outParams = NULL;
         WDMP_STATUS methodStatus = WDMP_FAILURE;
         rbusError_t rc = RBUS_ERROR_SUCCESS;
-        param_t *p = NULL;
+        bool isAsync = false;
 
-        WalInfo("************** handleMethodInvoke *****************\n");
+        WalPrint("************** handleMethodInvoke *****************\n");
 
-        /* A method request carries exactly one RDK.Operate parameter. */
-        if(setReq == NULL || setReq->paramCnt != 1 || setReq->param == NULL)
+        /* Validate and parse the operate payload into method name and input params. */
+        if(parseOperatePayload(setReq, &methodName,
+                              &inParams, &isAsync, &errorObj) != 0)
         {
-                WalError("RDK.Operate method request must carry exactly one parameter\n");
+                goto respond;
+        }
+        responseName = methodName;
+
+        if(isAsync)
+        {
+                WalError("Async method invocation is not supported\n");
                 errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "RDK.Operate method request must carry exactly one parameter");
-                goto respond;
-        }
-
-        p = &setReq->param[0];
-        if(p->type != WDMP_BASE64)
-        {
-                WalError("RDK.Operate parameter must be Base64 (dataType 5)\n");
-                errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "RDK.Operate parameter must be Base64 (dataType 5)");
-                goto respond;
-        }
-        if(p->value == NULL)
-        {
-                WalError("RDK.Operate parameter value is missing\n");
-                errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "RDK.Operate parameter value is missing");
-                goto respond;
-        }
-
-        /* Base64-decode the operate payload. */
-        decoded = base64Decode(p->value, &decodedLen);
-        if(decoded == NULL)
-        {
-                WalError("Failed to Base64-decode operate payload\n");
-                errorObj = buildErrorObject(METHOD_ERR_PARSE,
-                        "Failed to Base64-decode operate payload");
-                goto respond;
-        }
-        WalInfo("Decoded operate payload (%zu bytes): %s\n", decodedLen, decoded);
-
-        /* Parse the decoded operate payload JSON. */
-        operateJson = cJSON_Parse(decoded);
-        if(operateJson == NULL)
-        {
-                WalError("Operate payload is not valid JSON\n");
-                errorObj = buildErrorObject(METHOD_ERR_PARSE,
-                        "Operate payload is not valid JSON");
-                goto respond;
-        }
-
-        /* Extract the mandatory method name. */
-        methodItem = cJSON_GetObjectItem(operateJson, "method");
-        if(methodItem == NULL || !cJSON_IsString(methodItem) ||
-                methodItem->valuestring == NULL || methodItem->valuestring[0] == '\0')
-        {
-                WalError("Operate payload is missing the method name\n");
-                errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "Operate payload is missing the method name");
-                goto respond;
-        }
-        responseName = methodItem->valuestring;
-        WalInfo("Method invocation target: %s\n", responseName);
-
-        /* Convert the optional params object into an RBUS input object. */
-        rbusObject_Init(&inParams, NULL);
-        paramsItem = cJSON_GetObjectItem(operateJson, "params");
-        if(paramsItem != NULL && cJSON_IsObject(paramsItem))
-        {
-                if(jsonObjectToRbus(paramsItem, inParams) != 0)
-                {
-                        WalError("Failed to convert params to RBUS input object\n");
-                        errorObj = buildErrorObject(METHOD_ERR_INTERNAL,
-                                "Failed to convert params to RBUS input object");
-                        goto respond;
-                }
-        }
-
-        /* Optional rspDestination controls invocation mode. When provided,
-         * the request is asynchronous and not supported in Phase 1. */
-        rspDestinationItem = cJSON_GetObjectItem(operateJson, "rspDestination");
-        if(rspDestinationItem != NULL)
-        {
-                if(!cJSON_IsString(rspDestinationItem) || rspDestinationItem->valuestring == NULL)
-                {
-                        WalError("Operate payload has invalid rspDestination\n");
-                        errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                                "Operate payload has invalid rspDestination");
-                        goto respond;
-                }
-                rspDestination = rspDestinationItem->valuestring;
-        }
-
-        if(rspDestination != NULL && rspDestination[0] != '\0')
-        {
-                WalError("received async request, and is not supported (rspDestination '%s')\n",
-                        rspDestination);
-                errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "The request is not valid / properly formatted");
+                        "The async request is not supported");
                 goto respond;
         }
 
         /* Invoke the method synchronously (blocking) and return the result
          * directly in the response payload carried by the HTTP response. */
-        //rc = webpaRbusMethodInvoke(responseName, inParams, &outParams);
-        rc = rbusMethod_Invoke(get_rbus_handle(), responseName, inParams, &outParams);
-                //for debugging purpose, dump the inParams to a file
-                if(inParams != NULL)
-                {
-                        FILE *tmpOut = fopen("/tmp/webpa_method_inParams.txt", "a+");
-                        if(tmpOut != NULL)
-                        {
-                                rbusObject_fwrite(inParams, 1, tmpOut);
-                                fclose(tmpOut);
-                                WalInfo("Dumped method inParams to /tmp/webpa_method_inParams.txt\n");
-                        }
-                        else
-                        {
-                                WalError("Failed to open /tmp/webpa_method_inParams.txt for writing inParams\n");
-                        }
-                }
-                //for debugging purpose, dump the outParams to a file
+        rc = webpaRbusMethodInvoke(responseName, inParams, &outParams);
+#if 0
+        dumpRbusObjectWithTimestamp("/tmp/webpa_method_inParams.txt", "inParams", responseName, inParams);
+        dumpRbusObjectWithTimestamp("/tmp/webpa_method_outParams.txt", "outParams", responseName, outParams);
+#endif
+        if((rc != RBUS_ERROR_SUCCESS))
+        {
+                int code = mapRbusErrorToMethodError(rc);
+                const char *rbusDetail = rbusError_ToString(rc);
+                char detail[256] = {'\0'};
+                snprintf(detail, sizeof(detail), "RBUS error: %s", (rbusDetail != NULL && rbusDetail[0] != '\0') ? rbusDetail : "unknown");                
+                WalError("rbusMethod_Invoke failed for method '%s' with error code %d: %s\n", responseName, rc, detail);
                 if(outParams != NULL)
                 {
-                        FILE *tmpOut = fopen("/tmp/webpa_method_outParams.txt", "a+");
-                        if(tmpOut != NULL)
+                        resultObj = cJSON_CreateObject();
+                        if(rbusObjectToJson(outParams, resultObj) == 0)
                         {
-                                rbusObject_fwrite(outParams, 1, tmpOut);
-                                fclose(tmpOut);
-                                WalInfo("Dumped method outParams to /tmp/webpa_method_outParams.txt\n");
+                                errorObj = buildErrorObjectFromJson(code, resultObj);                                
                         }
                         else
                         {
-                                WalError("Failed to open /tmp/webpa_method_outParams.txt for writing outParams\n");
+                                WalError("Failed to convert RBUS outParams to JSON\n");
+                                errorObj = buildErrorObject(METHOD_ERR_INTERNAL, "Failed to convert RBUS result object to JSON");
                         }
-                }        
-        if(rc != RBUS_ERROR_SUCCESS)
-        {
-                char detail[256] = {'\0'};
-                int code = METHOD_ERR_INTERNAL;
-                WalError("rbusMethod_Invoke failed for method '%s' with error code %d\n", responseName, rc);
-
-                if(rc == RBUS_ERROR_DESTINATION_NOT_FOUND)
-                {
-                        code = METHOD_ERR_METHOD_NOT_FOUND;
-                        snprintf(detail, sizeof(detail),
-                                "No RBUS provider for method %s", responseName);
-                }
-                else if(rc == RBUS_ERROR_INVALID_INPUT)
-                {
-                        code = METHOD_ERR_INVALID_PARAMS;
-                        snprintf(detail, sizeof(detail),
-                                "Provider rejected input (RBUS_ERROR_INVALID_INPUT)");
                 }
                 else
                 {
-                        code = METHOD_ERR_INTERNAL;
-                        snprintf(detail, sizeof(detail),
-                                "RBUS invocation failed with error code %d", rc);
+                        errorObj = buildErrorObject(code, detail);
                 }
-                WalError("%s\n", detail);
-                errorObj = buildErrorObject(code, detail);
                 goto respond;
         }
 
         /* Convert the RBUS result object back into JSON. */
         resultObj = cJSON_CreateObject();
         if(outParams != NULL)
-        {
+        {       
                 if(rbusObjectToJson(outParams, resultObj) != 0)
                 {
                         WalError("Failed to convert RBUS result object to JSON\n");
@@ -249,14 +141,23 @@ void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
                                 "Failed to convert RBUS result object to JSON");
                         goto respond;
                 }
-
         }
         else
         {
-                WalInfo("Method %s returned no RBUS output parameters\n", responseName);
+                WalInfo("method outParams is empty\n");
         }
 
+        cJSON *resultWrapper = cJSON_CreateObject();
+        if(resultWrapper == NULL)
+        {
+                WalError("Failed to allocate result wrapper JSON object\n");
+                errorObj = buildErrorObject(METHOD_ERR_INTERNAL,"Failed to serialize method result JSON");
+                goto respond;
+        }
+        cJSON_AddItemToObject(resultWrapper, "result", resultObj);
+        resultObj = resultWrapper;
         resultStr = cJSON_PrintUnformatted(resultObj);
+
         if(resultStr == NULL)
         {
                 WalError("Failed to serialize method result JSON\n");
@@ -264,9 +165,10 @@ void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
                         "Failed to serialize method result JSON");
                 goto respond;
         }
+        WalInfo("Method response: %s\n", resultStr);
 
         methodStatus = WDMP_SUCCESS;
-        WalInfo("Method %s invoked successfully\n", responseName);
+        WalPrint("Method %s invoked successfully\n", responseName);
 
 respond:
         if(resObj != NULL)
@@ -303,24 +205,18 @@ respond:
 
                 if(resObj->u.paramRes != NULL && resObj->u.paramRes->params != NULL)
                 {
-                        if(resObj->u.paramRes->params[0].name != NULL)
-                        {
-                                free(resObj->u.paramRes->params[0].name);
-                        }
-                        if(resObj->u.paramRes->params[0].value != NULL)
-                        {
-                                free(resObj->u.paramRes->params[0].value);
-                        }
+                        WAL_FREE(resObj->u.paramRes->params[0].name);
+                        WAL_FREE(resObj->u.paramRes->params[0].value);
+
                         resObj->u.paramRes->params[0].name = strdup(responseName);
                         if(errorObj != NULL)
                         {
-                                WalInfo("Encoding method error payload for %s: %s\n", responseName, errorObj);
+                                WalPrint("Encoding method error payload for %s: %s\n", responseName, errorObj);
                                 b64message = base64Encode(errorObj);
                                 if(b64message != NULL)
                                 {
                                         resObj->u.paramRes->params[0].value = strdup(b64message);
-                                        free(b64message);
-                                        b64message = NULL;
+                                        WAL_FREE(b64message);
                                 }
                                 else
                                 {
@@ -332,13 +228,12 @@ respond:
                         }
                         else if(resultStr != NULL)
                         {
-                                WalInfo("Encoding method result payload for %s: %s\n", responseName, resultStr);
+                                WalPrint("Encoding method result payload for %s: %s\n", responseName, resultStr);
                                 b64message = base64Encode(resultStr);
                                 if(b64message != NULL)
                                 {
                                         resObj->u.paramRes->params[0].value = strdup(b64message);
-                                        free(b64message);
-                                        b64message = NULL;
+                                        WAL_FREE(b64message);
                                 }
                                 else
                                 {
@@ -358,30 +253,14 @@ respond:
                 }
         }
 
-        if(errorObj != NULL)
-        {
-                free(errorObj);
-        }
-        if(operateJson != NULL)
-        {
-                cJSON_Delete(operateJson);
-        }
-        if(decoded != NULL)
-        {
-                free(decoded);
-        }
-        if(resultStr != NULL)
-        {
-                free(resultStr);
-        }
+        WAL_FREE(errorObj);
+        WAL_FREE(methodName);
+        WAL_FREE(resultStr);
         if(resultObj != NULL)
         {
                 cJSON_Delete(resultObj);
         }
-        if(b64message != NULL)
-        {
-                free(b64message);
-        }
+        WAL_FREE(b64message);
         if(inParams != NULL)
         {
                 rbusObject_Release(inParams);
@@ -390,7 +269,139 @@ respond:
         {
                 rbusObject_Release(outParams);
         }
-        WalInfo("************** handleMethodInvoke *****************\n");
+        WalPrint("************** handleMethodInvoke *****************\n");
+}
+
+/**
+ * @brief parseOperatePayload validates the set request and parses the Base64-encoded
+ *        operate JSON payload into the method name and RBUS input parameters.
+ *
+ * @param[in]  setReq      incoming set request
+ * @param[out] methodName  extracted method name (caller frees)
+ * @param[out] inParams    RBUS input object (caller releases)
+ * @param[out] errorObj    error JSON string on failure (caller frees)
+ * @return 0 on success, -1 on failure (errorObj is set)
+ */
+static int parseOperatePayload(set_req_t *setReq,
+                char **methodName,
+                rbusObject_t *inParams, bool *isAsync, char **errorObj)
+{
+        char *decoded = NULL;
+        size_t decodedLen = 0;
+        cJSON *operateJson = NULL;
+        cJSON *methodItem = NULL;
+        cJSON *paramsItem = NULL;
+        cJSON *rspDestinationItem = NULL;
+        const char *rspDestination = NULL;
+        param_t *p = NULL;
+
+        /* A method request carries exactly one RDK.Operate parameter. */
+        if(setReq->paramCnt != 1)
+        {
+                WalError("RDK.Operate method request must carry exactly one parameter\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
+                        "RDK.Operate method request must carry exactly one parameter");
+                return -1;
+        }
+
+        p = &setReq->param[0];
+        if(p->type != WDMP_BASE64)
+        {
+                WalError("RDK.Operate parameter must be Base64 (dataType 5)\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
+                        "RDK.Operate parameter must be Base64 (dataType 5)");
+                return -1;
+        }
+        if(p->value == NULL)
+        {
+                WalError("RDK.Operate parameter value is missing\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
+                        "RDK.Operate parameter value is missing");
+                return -1;
+        }
+
+        /* Base64-decode the operate payload. */
+        decoded = base64Decode(p->value, &decodedLen);
+        if(decoded == NULL)
+        {
+                WalError("Failed to Base64-decode operate payload\n");
+                *errorObj = buildErrorObject(METHOD_ERR_PARSE,
+                        "Failed to Base64-decode operate payload");
+                return -1;
+        }
+        WalPrint("Base64-decoded operate payload (%zu bytes): %s\n", decodedLen, decoded);
+
+        /* Parse the decoded operate payload JSON. */
+        operateJson = cJSON_Parse(decoded);
+        WAL_FREE(decoded);
+        if(operateJson == NULL)
+        {
+                WalError("Operate payload is not valid JSON\n");
+                *errorObj = buildErrorObject(METHOD_ERR_PARSE,
+                        "Operate payload is not valid JSON");
+                return -1;
+        }
+
+        /* Extract the mandatory method name. */
+        methodItem = cJSON_GetObjectItem(operateJson, "method");
+        if(methodItem == NULL || !cJSON_IsString(methodItem) ||
+                methodItem->valuestring == NULL || methodItem->valuestring[0] == '\0')
+        {
+                WalError("Operate payload is missing the method name\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
+                        "Operate payload is missing the method name");
+                cJSON_Delete(operateJson);
+                return -1;
+        }
+        *methodName = strdup(methodItem->valuestring);
+        if(*methodName == NULL)
+        {
+                WalError("Failed to allocate memory for method name\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INTERNAL,
+                        "Failed to allocate memory for method name");
+                cJSON_Delete(operateJson);
+                return -1;
+        }
+        WalPrint("Method invocation target: %s\n", *methodName);
+
+        /* Convert the optional params object into an RBUS input object. */
+        rbusObject_Init(inParams, NULL);
+        paramsItem = cJSON_GetObjectItem(operateJson, "params");
+        if(paramsItem != NULL && cJSON_IsObject(paramsItem))
+        {
+                if(jsonObjectToRbus(paramsItem, *inParams) != 0)
+                {
+                        WalError("Failed to convert params to RBUS input object\n");
+                        *errorObj = buildErrorObject(METHOD_ERR_INTERNAL,
+                                "Failed to convert params to RBUS input object");
+                        cJSON_Delete(operateJson);
+                        return -1;
+                }
+        }
+
+        /* Optional rspDestination controls invocation mode. When provided,
+         * the request is asynchronous. */
+        *isAsync = false;
+        rspDestinationItem = cJSON_GetObjectItem(operateJson, "rspDestination");
+        if(rspDestinationItem != NULL)
+        {
+                if(!cJSON_IsString(rspDestinationItem) || rspDestinationItem->valuestring == NULL)
+                {
+                        WalError("Operate payload has invalid rspDestination\n");
+                        *errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
+                                "Operate payload has invalid rspDestination");
+                        cJSON_Delete(operateJson);
+                        return -1;
+                }
+                rspDestination = rspDestinationItem->valuestring;
+                if(rspDestination[0] != '\0')
+                {
+                        *isAsync = true;
+                }
+        }
+
+        cJSON_Delete(operateJson);
+        return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -484,6 +495,23 @@ static char *buildErrorObject(int code, const char *data)
         return out;
 }
 
+static char *buildErrorObjectFromJson(int code, cJSON *dataObj)
+{
+        cJSON *root = cJSON_CreateObject();
+        cJSON *err = cJSON_CreateObject();
+        char *out = NULL;
+
+        cJSON_AddNumberToObject(err, "code", code);
+        if(dataObj != NULL)
+        {
+                cJSON_AddItemToObject(err, "data", cJSON_Duplicate(dataObj, 1));
+        }
+        cJSON_AddItemToObject(root, "error", err);
+        out = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        return out;
+}
+
 /**
  * @brief buildMethodResponse builds the method response payload
  *        { "statusCode", "parameters": [ { "name", "message" } ] } where
@@ -552,10 +580,7 @@ static char *buildMethodResponse(const char *name, int statusCode, cJSON *messag
                 WalInfo("buildMethodResponse: payload: %s\n", payload);
         }
         cJSON_Delete(root);
-        if(b64message != NULL)
-        {
-                free(b64message);
-        }
+        WAL_FREE(b64message);
         return payload;
 }
 
@@ -573,35 +598,25 @@ static rbusValueType_t wdmpToRbusType(int wdmpType)
                 case WDMP_ULONG:   return RBUS_UINT64;
                 case WDMP_FLOAT:   return RBUS_SINGLE;
                 case WDMP_DOUBLE:  return RBUS_DOUBLE;
+                case WDMP_DATETIME:return RBUS_DATETIME;
+                case WDMP_BASE64:  return RBUS_BYTES;
+                case WDMP_BYTE:    return RBUS_BYTES;
+                case WDMP_NONE:    return RBUS_NONE;
                 case WDMP_STRING:
-                case WDMP_DATETIME:
-                case WDMP_BASE64:
-                case WDMP_BYTE:
                 default:           return RBUS_STRING;
         }
 }
 
-/**
- * @brief rbusToWdmpType maps an rbusValueType_t back to a WDMP DATA_TYPE.
- */
-static int rbusToWdmpType(rbusValueType_t rt)
+static int mapRbusErrorToMethodError(rbusError_t rc)
 {
-        switch(rt)
+        switch(rc)
         {
-                case RBUS_BOOLEAN: return WDMP_BOOLEAN;
-                case RBUS_INT8:
-                case RBUS_INT16:
-                case RBUS_INT32:   return WDMP_INT;
-                case RBUS_BYTE:
-                case RBUS_UINT8:
-                case RBUS_UINT16:
-                case RBUS_UINT32:  return WDMP_UINT;
-                case RBUS_INT64:   return WDMP_LONG;
-                case RBUS_UINT64:  return WDMP_ULONG;
-                case RBUS_SINGLE:  return WDMP_FLOAT;
-                case RBUS_DOUBLE:  return WDMP_DOUBLE;
-                case RBUS_STRING:
-                default:           return WDMP_STRING;
+                case RBUS_ERROR_DESTINATION_NOT_FOUND:
+                        return METHOD_ERR_METHOD_NOT_FOUND;
+                case RBUS_ERROR_INVALID_INPUT:
+                        return METHOD_ERR_INVALID_PARAMS;
+                default:
+                        return METHOD_ERR_INTERNAL;
         }
 }
 
@@ -650,43 +665,28 @@ static int jsonScalarToRbusValue(cJSON *val, rbusValue_t *out)
 static int jsonLeafToRbusValue(cJSON *val, int wdmpType, rbusValue_t *out)
 {
         rbusValueType_t rt = wdmpToRbusType(wdmpType);
-        char numbuf[64] = {'\0'};
         const char *str = NULL;
 
         if(cJSON_IsString(val))
         {
                 str = val->valuestring != NULL ? val->valuestring : "";
         }
-        else if(cJSON_IsNumber(val))
-        {
-                if(val->valuedouble == (double) val->valueint)
-                {
-                        snprintf(numbuf, sizeof(numbuf), "%d", val->valueint);
-                }
-                else
-                {
-                        snprintf(numbuf, sizeof(numbuf), "%g", val->valuedouble);
-                }
-                str = numbuf;
-        }
-        else if(cJSON_IsBool(val))
-        {
-                str = cJSON_IsTrue(val) ? "true" : "false";
-        }
-        else if(cJSON_IsNull(val))
-        {
-                str = "";
-        }
         else
         {
+                /* The operate payload always encodes parameter values as JSON strings
+                 * (e.g. "value": "<string>"), regardless of the target dataType.
+                 * If the value is not a string, it is invalid; return -1 for error. */
                 return -1;
         }
 
         rbusValue_Init(out);
         if(!rbusValue_SetFromString(*out, rt, str))
         {
-                /* Fall back to a plain string if coercion fails. */
-                rbusValue_SetString(*out, str);
+                /* rbusValue_SetFromString failed to parse the string into the
+                 * requested rbus type; release and return -1 for error. */
+                rbusValue_Release(*out);
+                *out = NULL;
+                return -1;
         }
         return 0;
 }
@@ -758,8 +758,8 @@ static int jsonObjectToRbus(cJSON *jsonObj, rbusObject_t rbusObj)
 }
 
 /**
- * @brief rbusValueToJson converts a single rbusValue into a JSON leaf
- *        { "value", "dataType" } or a nested object for RBUS_OBJECT.
+ * @brief rbusValueToJson converts a single rbusValue into a JSON scalar
+ *        or nested object for RBUS_OBJECT.
  *
  * @return newly-allocated cJSON node or NULL on failure
  */
@@ -780,56 +780,62 @@ static cJSON *rbusValueToJson(rbusValue_t val)
                 return nested;
         }
 
-        leaf = cJSON_CreateObject();
-        cJSON_AddNumberToObject(leaf, "dataType", rbusToWdmpType(rt));
-
         switch(rt)
         {
                 case RBUS_BOOLEAN:
-                        cJSON_AddBoolToObject(leaf, "value", rbusValue_GetBoolean(val));
+                        leaf = cJSON_CreateBool(rbusValue_GetBoolean(val));
                         break;
                 case RBUS_INT8:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetInt8(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetInt8(val));
                         break;
                 case RBUS_UINT8:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetUInt8(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetUInt8(val));
                         break;
                 case RBUS_INT16:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetInt16(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetInt16(val));
                         break;
                 case RBUS_UINT16:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetUInt16(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetUInt16(val));
                         break;
                 case RBUS_INT32:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetInt32(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetInt32(val));
                         break;
                 case RBUS_UINT32:
-                        cJSON_AddNumberToObject(leaf, "value", (double) rbusValue_GetUInt32(val));
+                        leaf = cJSON_CreateNumber((double) rbusValue_GetUInt32(val));
                         break;
                 case RBUS_INT64:
-                        cJSON_AddNumberToObject(leaf, "value", (double) rbusValue_GetInt64(val));
+                        leaf = cJSON_CreateNumber((double) rbusValue_GetInt64(val));
                         break;
                 case RBUS_UINT64:
-                        cJSON_AddNumberToObject(leaf, "value", (double) rbusValue_GetUInt64(val));
+                        leaf = cJSON_CreateNumber((double) rbusValue_GetUInt64(val));
                         break;
                 case RBUS_SINGLE:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetSingle(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetSingle(val));
                         break;
                 case RBUS_DOUBLE:
-                        cJSON_AddNumberToObject(leaf, "value", rbusValue_GetDouble(val));
+                        leaf = cJSON_CreateNumber(rbusValue_GetDouble(val));
                         break;
                 case RBUS_STRING:
                 {
                         int len = 0;
                         const char *s = rbusValue_GetString(val, &len);
-                        cJSON_AddStringToObject(leaf, "value", s != NULL ? s : "");
+                        if(s != NULL && (s[0] == '{' || s[0] == '[' || s[0] == '"'))
+                        {
+                                cJSON *parsed = cJSON_Parse(s);
+                                if(parsed != NULL)
+                                {
+                                        leaf = parsed;
+                                        break;
+                                }
+                        }
+                        leaf = cJSON_CreateString(s != NULL ? s : "");
                         break;
                 }
                 default:
                 {
                         char buf[512] = {'\0'};
                         rbusValue_ToString(val, buf, sizeof(buf));
-                        cJSON_AddStringToObject(leaf, "value", buf);
+                        leaf = cJSON_CreateString(buf);
                         break;
                 }
         }
@@ -843,17 +849,13 @@ static cJSON *rbusValueToJson(rbusValue_t val)
  */
 static int rbusObjectToJson(rbusObject_t obj, cJSON *jsonOut)
 {
-        int i = 0;
-        rbusValue_t value = NULL;
-        rbusValueType_t type = RBUS_NONE;
-        char *str_value = NULL;
         if(obj == NULL || jsonOut == NULL)
         {
                 WalError("rbusObjectToJson: invalid input (obj=%p, jsonOut=%p)\n", obj, jsonOut);
                 return -1;
         }
 
-        WalInfo("rbusObjectToJson: start converting RBUS object to JSON\n");
+        WalPrint("rbusObjectToJson: start converting RBUS object to JSON\n");
         rbusProperty_t prop = rbusObject_GetProperties(obj);
 
         if(prop == NULL)
@@ -863,53 +865,73 @@ static int rbusObjectToJson(rbusObject_t obj, cJSON *jsonOut)
 
         while(prop != NULL)
         {
-                // const char *name = rbusProperty_GetName(prop);
-                // rbusValue_t val = rbusProperty_GetValue(prop);
+                const char *name = rbusProperty_GetName(prop);
+                rbusValue_t val = rbusProperty_GetValue(prop);
 
-                // if(name != NULL && val != NULL)
-                // {
-                //         WalInfo("rbusObjectToJson: converting property '%s'\n", name);
-                //         cJSON *leaf = rbusValueToJson(val);
-                //         if(leaf == NULL)
-                //         {
-                //                 WalError("rbusObjectToJson: failed converting property '%s'\n", name);
-                //                 return -1;
-                //         }
-                //         cJSON_AddItemToObject(jsonOut, name, leaf);
-                // }
-                // else
-                // {
-                //         WalInfo("rbusObjectToJson: skipping property with missing name/value (name=%s, value=%p)\n",
-                //                 name != NULL ? name : "<null>", val);
-                // }
-                value = rbusProperty_GetValue(prop);
-                if(value)
+                if(name != NULL && val != NULL)
                 {
-                        type = rbusValue_GetType(value);
-                        str_value = rbusValue_ToString(value,NULL,0);
-
-                        if(str_value)
+                        WalPrint("rbusObjectToJson: converting property '%s'\n", name);
+                        cJSON *leaf = rbusValueToJson(val);
+                        if(leaf == NULL)
                         {
-                                WalInfo ("Parameter %2d:\r\n", ++i);
-                                WalInfo ("              Name  : %s\r\n", rbusProperty_GetName(prop));
-                                //WalInfo ("              Type  : %s\r\n", getDataType_toString(type));
-                                WalInfo ("              Value : %s\r\n", str_value);
-                                cJSON *leaf = rbusValueToJson(value);
-                                if(leaf == NULL)
-                                {
-                                        WalError("rbusObjectToJson: failed converting property '%s'\n", rbusProperty_GetName(prop));
-                                        return -1;
-                                }
-                                cJSON_AddStringToObject(jsonOut, rbusProperty_GetName(prop), leaf);
-                                free(str_value);
+                                WalError("rbusObjectToJson: failed converting property '%s'\n", name);
+                                return -1;
                         }
+                        cJSON_AddItemToObject(jsonOut, name, leaf);
                 }
                 else
                 {
-                        WalInfo("rbusObjectToJson: skipping property with missing value (value=%p)\n", value);
-                }                                
+                        WalError("rbusObjectToJson: skipping property with missing name/value (name=%s, value=%p)\n",
+                                name != NULL ? name : "<null>", val);
+                }                             
                 prop = rbusProperty_GetNext(prop);
         }
-        WalInfo("rbusObjectToJson: conversion completed successfully\n");
+        WalPrint("rbusObjectToJson: conversion completed successfully\n");
         return 0;
 }
+#if 0
+static void dumpRbusObjectWithTimestamp(const char *path, const char *label,
+                const char *responseName, rbusObject_t obj)
+{
+        FILE *tmpOut = NULL;
+        time_t now = 0;
+        struct tm localTm;
+        char timestamp[32] = {'\0'};
+
+        if(path == NULL || label == NULL || responseName == NULL || obj == NULL)
+        {
+                return;
+        }
+
+        tmpOut = fopen(path, "a+");
+        if(tmpOut == NULL)
+        {
+                WalError("Failed to open %s for writing %s\n", path, label);
+                return;
+        }
+
+        now = time(NULL);
+        if(now != (time_t) -1 && localtime_r(&now, &localTm) != NULL &&
+                strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &localTm) > 0)
+        {
+                fprintf(tmpOut, "[%s] method=%s %s\n", timestamp, responseName, label);
+        }
+        else
+        {
+                fprintf(tmpOut, "[timestamp unavailable] method=%s %s\n", responseName, label);
+        }
+
+        rbusObject_fwrite(obj, 1, tmpOut);
+        fputc('\n', tmpOut);
+        fclose(tmpOut);
+
+        if(timestamp[0] != '\0')
+        {
+                WalPrint("Dumped method %s to %s at %s\n", label, path, timestamp);
+        }
+        else
+        {
+                WalPrint("Dumped method %s to %s\n", label, path);
+        }
+}
+#endif

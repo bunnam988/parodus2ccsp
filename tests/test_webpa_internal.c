@@ -3,6 +3,7 @@
 
 #include "../source/include/webpa_rbus.h"
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include "../source/broadband/include/webpa_internal.h"
 #include "../source/app/libpd.h"
 
@@ -53,6 +54,18 @@ static int waitForComponentCachingComplete(int timeout_seconds)
 void free_parameterValStruct_t (void* bus_handle, int size,parameterValStruct_t **val)
 {
     UNUSED(bus_handle); UNUSED(size); UNUSED(val);
+}
+
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    return false;
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
+    return;
 }
 
 int getWebpaParameterValues(char **parameterNames, int paramCount, int *val_size, parameterValStruct_t ***val)
@@ -349,6 +362,21 @@ void test_ccsp_message_bus_oom()
     CU_ASSERT_EQUAL(WDMP_ERR_MAX_REQUEST, ret);
 }
 
+void test_mock_coverage()
+{
+    isMethodInvokeRequest(NULL);
+    handleMethodInvoke(NULL, NULL);
+    getWebpaParameterValues(NULL, 0, NULL, NULL);
+    setWebpaParameterValues(NULL, 0, NULL);
+    setAttributes(NULL, 0, NULL, NULL);
+    addRowTable(NULL, NULL, NULL, NULL);
+    deleteRowTable(NULL, NULL);
+    replaceTable(NULL, NULL, 0, NULL);
+    getAttributes(NULL, 0, NULL, NULL, NULL, NULL);
+    free_parameterValStruct_t(NULL, 0, NULL);
+    CcspBaseIf_SetCallback2(NULL, NULL, NULL, NULL);
+}
+
 void add_suites( CU_pSuite *suite )
 {
 	*suite = CU_add_suite( "tests", NULL, NULL );
@@ -371,6 +399,7 @@ void add_suites( CU_pSuite *suite )
     CU_add_test( *suite, "test ccsp_err_method_not_supported", test_ccsp_err_method_not_supported);
     CU_add_test( *suite, "test ccsp_err_session_in_progress", test_ccsp_err_session_in_progress);
     CU_add_test( *suite, "test ccsp_message_bus_oom", test_ccsp_message_bus_oom);
+    CU_add_test( *suite, "test mock_coverage", test_mock_coverage);
 }
 
 

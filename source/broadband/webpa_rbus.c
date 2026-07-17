@@ -46,6 +46,7 @@ WDMP_STATUS webpaRbusInit(const char *pComponentName)
 void webpaRbus_Uninit()
 {
     rbus_close(rbus_handle);
+    rbus_handle = NULL;
 }
 
 rbusError_t setTraceContext(char* traceContext[])
@@ -129,7 +130,7 @@ rbusError_t clearTraceContext()
         /* CID-334846 missing return statement fix */
         return ret;
 }
-/*
+
 rbusError_t webpaRbusMethodInvoke(const char *methodName, rbusObject_t inParams, rbusObject_t *outParams)
 {
         if(!isRbusInitialized())
@@ -142,12 +143,7 @@ rbusError_t webpaRbusMethodInvoke(const char *methodName, rbusObject_t inParams,
                 WalError("Invalid arguments to webpaRbusMethodInvoke\n");
                 return RBUS_ERROR_INVALID_INPUT;
         }
-        WalInfo("Invoking RBUS method %s synchronously\n", methodName);
+        WalInfo("RBUS method invoke to %s synchronously\n", methodName);
         return rbusMethod_Invoke(rbus_handle, methodName, inParams, outParams);
 }
-*/
 
-rbusHandle_t get_rbus_handle(void)
-{
-    return rbus_handle;
-}

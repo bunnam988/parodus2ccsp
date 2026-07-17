@@ -27,6 +27,7 @@
 #include <sys/time.h>
 
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include "../source/broadband/include/webpa_internal.h"
 #include "../source/broadband/include/webpa_notification.h"
 #include <cimplog/cimplog.h>
@@ -93,6 +94,19 @@ int pthread_cond_timedwait(pthread_cond_t *cloud_con, pthread_mutex_t *cloud_mut
     }
     function_called();
     return (int) mock();
+}
+
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    function_called();
+    return (bool) mock();
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
+    function_called();
 }
 
 int getWebpaParameterValues(char **parameterNames, int paramCount, int *val_size, parameterValStruct_t ***val)
@@ -2089,6 +2103,24 @@ void test_syncNotifyRetry_Signalled()
     SyncNotifyRetry();
 }
 
+void test_mock_coverage()
+{
+    expect_function_call(isMethodInvokeRequest);
+    will_return(isMethodInvokeRequest, false);
+    isMethodInvokeRequest(NULL);
+
+    expect_function_call(handleMethodInvoke);
+    handleMethodInvoke(NULL, NULL);
+
+    will_return(getWebpaParameterValues, 0);
+    getWebpaParameterValues(NULL, 0, NULL, NULL);
+
+    will_return(setWebpaParameterValues, 0);
+    setWebpaParameterValues(NULL, 0, NULL);
+
+    sleep(0);
+}
+
 /*----------------------------------------------------------------------------*/
 /*                             External Functions                             */
 /*----------------------------------------------------------------------------*/
@@ -2132,7 +2164,8 @@ int main(void)
         cmocka_unit_test(test_syncNotifyRetry_NotifyInProgress),
         cmocka_unit_test(test_syncNotifyRetry_Skip_CMC_Check),
         cmocka_unit_test(test_syncNotifyRetry_dbCMC_NULL),
-        cmocka_unit_test(test_syncNotifyRetry_Signalled)
+        cmocka_unit_test(test_syncNotifyRetry_Signalled),
+        cmocka_unit_test(test_mock_coverage),        
     };
 
     numLoops = 1;

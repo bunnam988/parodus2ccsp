@@ -5,7 +5,7 @@
  *              invocation path triggered by the reserved RDK.Operate
  *              PATCH/SET parameter.
  *
- * Copyright (c) 2015  Comcast
+ * Copyright (c) 2026  Comcast
  */
 
 #ifndef _WEBPA_METHOD_H_
@@ -31,11 +31,10 @@
  *        to method-invocation handling.
  *
  * The current check is strict about shape and identifier only: the request
- * must contain exactly one parameter and that parameter name must be
- * RDK.Operate.
+ * must contain a parameter named RDK.Operate.
  *
  * @param[in] setReq parsed SET request
- * @return true when setReq has exactly one parameter named RDK.Operate
+ * @return true when setReq has a parameter named RDK.Operate
  */
 bool isMethodInvokeRequest(set_req_t *setReq);
 
