@@ -35,6 +35,7 @@ void test_webpaRbusInit_success()
 //Successcase for setTraceContext
 void test_setTraceContext_success()
 {
+    webpaRbusInit("componentName");
     WalInfo("\n**************************************************\n");
     rbusError_t rc = RBUS_ERROR_BUS_ERROR;
     char* traceContext[2];
@@ -46,6 +47,7 @@ void test_setTraceContext_success()
     CU_ASSERT_EQUAL(0,rc);
     free(traceContext[0]);
     free(traceContext[1]);
+    webpaRbus_Uninit();
 }
 
 //traceContext header NULL
@@ -74,6 +76,7 @@ void test_setTraceContext_header_empty()
 
 void test_getTraceContext_success()
 {
+    webpaRbusInit("componentName");
     WalInfo("\n**************************************************\n");
     rbusError_t rc = RBUS_ERROR_BUS_ERROR;
     char* traceContext[2];
@@ -84,9 +87,10 @@ void test_getTraceContext_success()
     rc = setTraceContext(traceContext);
     CU_ASSERT_EQUAL(0,rc);
 
-    getTraceContext(traceContext);
+    rc = getTraceContext(traceContext);
     CU_ASSERT_EQUAL(0,rc);
     clearTraceContext();
+    webpaRbus_Uninit();
 }
 
 void test_getTraceContext_empty()
@@ -95,8 +99,52 @@ void test_getTraceContext_empty()
     rbusError_t rc = RBUS_ERROR_BUS_ERROR;
     char* traceContext[2];
 
-    getTraceContext(traceContext);
+    rc = getTraceContext(traceContext);
     CU_ASSERT_EQUAL(1,rc);
+}
+
+void test_webpaRbusMethodInvoke()
+{
+    webpaRbusInit("testComponent");
+    WalInfo("\n**************************************************\n");
+    rbusError_t rc = RBUS_ERROR_BUS_ERROR;
+    char* responseName = "Device.DeviceInfo.Webpa.Method";
+    rbusObject_t inParams = NULL;
+    rbusObject_t outParams = NULL;
+
+    rc = webpaRbusMethodInvoke(responseName, inParams, &outParams);
+    CU_ASSERT_EQUAL(RBUS_ERROR_DESTINATION_NOT_FOUND,rc);
+    rbusObject_Release(outParams);
+    webpaRbus_Uninit();
+}
+
+void test_webpaRbusMethodInvoke_null()
+{
+    webpaRbusInit("testComponent");
+    WalInfo("\n**************************************************\n");
+    rbusError_t rc = RBUS_ERROR_BUS_ERROR;
+    char* responseName = NULL;
+    rbusObject_t inParams = NULL;
+    rbusObject_t outParams = NULL;
+
+    rc = webpaRbusMethodInvoke(responseName, inParams, &outParams);
+    CU_ASSERT_EQUAL(RBUS_ERROR_INVALID_INPUT,rc);
+    rbusObject_Release(outParams);
+    webpaRbus_Uninit();
+}
+
+void test_webpaRbusMethodInvoke_not_initialized()
+{
+    webpaRbus_Uninit();
+    WalInfo("\n**************************************************\n");
+    rbusError_t rc = RBUS_ERROR_BUS_ERROR;
+    char* responseName = NULL;
+    rbusObject_t inParams = NULL;
+    rbusObject_t outParams = NULL;
+
+    rc = webpaRbusMethodInvoke(responseName, inParams, &outParams);
+    CU_ASSERT_EQUAL(RBUS_ERROR_NOT_INITIALIZED,rc);
+    rbusObject_Release(outParams);
 }
 
 void add_suites( CU_pSuite *suite )
@@ -110,6 +158,9 @@ void add_suites( CU_pSuite *suite )
     CU_add_test( *suite, "test setTraceContext_header_empty", test_setTraceContext_header_empty);
     CU_add_test( *suite, "test getTraceContext_success", test_getTraceContext_success);
     CU_add_test( *suite, "test getTraceContext_empty", test_getTraceContext_empty);
+    CU_add_test( *suite, "test webpaRbusMethodInvoke", test_webpaRbusMethodInvoke);
+    CU_add_test( *suite, "test webpaRbusMethodInvoke NULL", test_webpaRbusMethodInvoke_null);
+    CU_add_test( *suite, "test webpaRbusMethodInvoke not initialized", test_webpaRbusMethodInvoke_not_initialized);    
 }
 
 

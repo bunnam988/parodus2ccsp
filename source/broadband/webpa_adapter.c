@@ -9,6 +9,7 @@
 #include "webpa_notification.h"
 #include "webpa_internal.h"
 #include "webpa_rbus.h"
+#include "webpa_method.h"
 #ifdef FEATURE_SUPPORT_WEBCONFIG
 #include <webcfg_generic.h>
 #endif
@@ -267,6 +268,15 @@ void processRequest(char *reqPayload,char *transactionId, char **resPayload, hea
                                 }
                                 WalPrint("After setTraceContext in WEBPA SET or SET_ATTRIBUTES request\n");
 
+                                /* Route RDK.Operate method requests through the
+                                 * dedicated method-invocation handler. */
+                                if(reqObj->reqType == SET && isMethodInvokeRequest(reqObj->u.setReq))
+                                {
+                                        WalInfo("Received RDK.Operate method invocation request\n");
+                                        handleMethodInvoke(reqObj->u.setReq, resObj);
+                                }
+                                else
+                                {
                                 for (i = 0; i < paramCount; i++) 
                                 {
                                         WalPrint("Request:> param[%d].name = %s\n",i,reqObj->u.setReq->param[i].name);
@@ -313,7 +323,7 @@ void processRequest(char *reqPayload,char *transactionId, char **resPayload, hea
                                         resObj->retStatus[0] = ret;
                                         WalPrint("Response:> resObj->retStatus[0] = %d\n",resObj->retStatus[0]);
                                 }
-                                
+                                }
 				WalPrint("Before getTraceContext in WEBPA SET or SET_ATTRIBUTES request\n");
 				if(res_headers != NULL) {
                                 	getTraceContext(res_headers->headers);

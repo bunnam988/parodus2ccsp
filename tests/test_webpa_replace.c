@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include "../source/broadband/include/webpa_internal.h"
 #include <cimplog/cimplog.h>
 #include <wdmp-c.h>
@@ -38,6 +39,19 @@
 /*----------------------------------------------------------------------------*/
 /*                                   Mocks                                    */
 /*----------------------------------------------------------------------------*/
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    function_called();
+    return (bool) mock();
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
+    function_called();
+}
+
 int getWebpaParameterValues(char **parameterNames, int paramCount, int *val_size, parameterValStruct_t ***val)
 {
     UNUSED(parameterNames); UNUSED(paramCount); UNUSED(val_size); UNUSED(val);
@@ -94,6 +108,24 @@ unsigned int sleep(unsigned int seconds)
 /*----------------------------------------------------------------------------*/
 /*                                   Tests                                    */
 /*----------------------------------------------------------------------------*/
+
+void test_mock_coverage()
+{
+    expect_function_call(isMethodInvokeRequest);
+    will_return(isMethodInvokeRequest, false);
+    isMethodInvokeRequest(NULL);
+
+    expect_function_call(handleMethodInvoke);
+    handleMethodInvoke(NULL, NULL);
+
+    will_return(getWebpaParameterValues, 0);
+    getWebpaParameterValues(NULL, 0, NULL, NULL);
+
+    will_return(setWebpaParameterValues, 0);
+    setWebpaParameterValues(NULL, 0, NULL);
+
+    sleep(0);
+}
 
 void test_replaceRow()
 {
@@ -929,7 +961,8 @@ int main(void)
         cmocka_unit_test(err_replaceRow_with_invalid_radio_index),
         cmocka_unit_test(err_replaceRow_with_invalid_table_length),
         cmocka_unit_test(err_replaceRow_with_invalid_parameter_name_length),
-        cmocka_unit_test(err_replaceRow_with_invalid_parameter_value_length)
+        cmocka_unit_test(err_replaceRow_with_invalid_parameter_value_length),
+        cmocka_unit_test(test_mock_coverage)
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

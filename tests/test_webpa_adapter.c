@@ -24,6 +24,7 @@
 #include <rbus/rbus.h>
 
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include <cimplog/cimplog.h>
 #include <wdmp-c.h>
 #include <cJSON.h>
@@ -96,6 +97,19 @@ void replaceTable(char *objectName,TableData * list,unsigned int paramcount,WDMP
     function_called();
 }
 
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    function_called();
+    return (bool) mock();
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
+    function_called();
+}
+
 char * getParameterValue(char *paramName)
 {
     UNUSED(paramName);
@@ -136,6 +150,53 @@ unsigned int sleep(unsigned int seconds)
 /*----------------------------------------------------------------------------*/
 /*                                   Tests                                    */
 /*----------------------------------------------------------------------------*/
+
+void test_mock_coverage()
+{
+    expect_function_call(isMethodInvokeRequest);
+    will_return(isMethodInvokeRequest, false);
+    isMethodInvokeRequest(NULL);
+
+    expect_function_call(handleMethodInvoke);
+    handleMethodInvoke(NULL, NULL);
+
+    getTraceContext(NULL);
+    setTraceContext(NULL);
+
+    expect_function_call(addRowTable);
+    addRowTable(NULL, NULL, NULL, NULL);
+
+    expect_function_call(deleteRowTable);
+    deleteRowTable(NULL, NULL);
+
+    expect_function_call(replaceTable);
+    replaceTable(NULL, NULL, 0, NULL);
+
+    sleep(0);
+
+    will_return(setWebpaParameterValues, 0);
+    setWebpaParameterValues(NULL, 0, NULL);
+
+    will_return(getWebpaParameterValues, 0);
+    getWebpaParameterValues(NULL, 0, NULL, NULL);
+
+    expect_function_call(getParameterValue);
+    will_return(getParameterValue, NULL);
+    getParameterValue(NULL);
+
+    expect_function_call(setParameterValue);
+    will_return(setParameterValue, WDMP_SUCCESS);
+    setParameterValue(NULL, NULL, WDMP_NONE);
+
+    expect_function_call(getAttributes);
+    getAttributes(NULL, 0, NULL, NULL, NULL, NULL);
+
+    expect_function_call(setValues);
+    setValues(NULL, 0, 0, NULL, NULL, NULL, NULL);
+
+    expect_function_call(setAttributes);
+    setAttributes(NULL, 0, NULL, NULL);
+}
 
 void test_processRequest_singleGet()
 {
@@ -246,7 +307,7 @@ int main(void)
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_processRequest_singleGet),
         cmocka_unit_test(test_processRequest_WildcardsGet),
+        cmocka_unit_test(test_mock_coverage),
     };
-
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

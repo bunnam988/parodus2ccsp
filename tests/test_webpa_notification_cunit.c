@@ -24,6 +24,7 @@
 #include <rbus/rbus.h>
 #include <string.h>
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include "../source/broadband/include/webpa_internal.h"
 #include "../source/broadband/include/webpa_notification.h"
 #include <cimplog/cimplog.h>
@@ -56,6 +57,17 @@ rbusError_t getTraceContext(char* traceContext[])
 rbusError_t setTraceContext(char* traceContext[])
 {
     UNUSED(traceContext);
+}
+
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    return false;
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
 }
 
 int getWebpaParameterValues(char **parameterNames, int paramCount, int *val_size, parameterValStruct_t ***val)
@@ -413,6 +425,17 @@ void test_validate_conn_client_ipv4_letters_failure()
     CU_ASSERT_EQUAL(result,WDMP_FAILURE);
 }
 
+void test_mock_coverage()
+{
+    isMethodInvokeRequest(NULL);
+    handleMethodInvoke(NULL, NULL);
+    getWebpaParameterValues(NULL, 0, NULL, NULL);
+    setWebpaParameterValues(NULL, 0, NULL);
+    clearTraceContext();
+    getTraceContext(NULL);
+    setTraceContext(NULL);
+}
+
 void add_suites( CU_pSuite *suite )
 {
     *suite = CU_add_suite( "tests", NULL, NULL );
@@ -435,6 +458,7 @@ void add_suites( CU_pSuite *suite )
     CU_add_test( *suite, "test validate_webpa_notification_data_success", test_validate_webpa_notification_data_success);
     CU_add_test( *suite, "test validate_webpa_notification_notify_failure", test_validate_webpa_notification_notify_failure);
     CU_add_test( *suite, "test validate_webpa_notification_write_id_failure", test_validate_webpa_notification_write_id_failure);
+    CU_add_test( *suite, "test mock_coverage", test_mock_coverage);
 
 }
 

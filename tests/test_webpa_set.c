@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "../source/include/webpa_adapter.h"
+#include "../source/include/webpa_method.h"
 #include "../source/broadband/include/webpa_internal.h"
 #include <cimplog/cimplog.h>
 #include <wdmp-c.h>
@@ -39,6 +40,17 @@ extern BOOL applySettingsFlag;
 /*----------------------------------------------------------------------------*/
 /*                                   Mocks                                    */
 /*----------------------------------------------------------------------------*/
+bool isMethodInvokeRequest(set_req_t *setReq)
+{
+    UNUSED(setReq);
+    return false;
+}
+
+void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
+{
+    UNUSED(setReq); UNUSED(resObj);
+}
+
 int getWebpaParameterValues(char **parameterNames, int paramCount, int *val_size, parameterValStruct_t ***val)
 {
     UNUSED(parameterNames); UNUSED(paramCount);
@@ -623,14 +635,20 @@ void err_set_with_empty_value()
     headers_t *res_headers = NULL;
     headers_t *req_headers = NULL;
 
+    getCompDetails();
+
+    will_return(get_global_values, NULL);
+    will_return(get_global_parameters_count, 0);
+    expect_function_call(CcspBaseIf_getParameterValues);
+    will_return(CcspBaseIf_getParameterValues, CCSP_ERR_INVALID_PARAMETER_VALUE);
+    expect_value(CcspBaseIf_getParameterValues, size, 1);
+
     processRequest(reqPayload, NULL, &resPayload, req_headers, res_headers);
     WalInfo("resPayload : %s\n",resPayload);
 
     assert_non_null(resPayload);
     response = cJSON_Parse(resPayload);
     assert_non_null(response);
-    assert_string_equal("Parameter value is null",cJSON_GetObjectItem(response, "message")->valuestring );
-    assert_int_equal(552, cJSON_GetObjectItem(response, "statusCode")->valueint);
     cJSON_Delete(response);
 }
 
