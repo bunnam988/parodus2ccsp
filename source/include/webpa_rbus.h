@@ -21,4 +21,7 @@ rbusError_t getTraceContext(char* traceContext[]);
 rbusError_t clearTraceContext();
 
 rbusError_t webpaRbusMethodInvoke(const char *methodName, rbusObject_t inParams, rbusObject_t *outParams);
+rbusError_t webpaRbusMethodInvokeAsync(const char *methodName, rbusObject_t inParams,
+                                        rbusMethodAsyncRespHandler_t callback, int timeout,
+                                        void *userData);
 #endif

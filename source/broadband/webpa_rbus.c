@@ -147,3 +147,21 @@ rbusError_t webpaRbusMethodInvoke(const char *methodName, rbusObject_t inParams,
         return rbusMethod_Invoke(rbus_handle, methodName, inParams, outParams);
 }
 
+rbusError_t webpaRbusMethodInvokeAsync(const char *methodName, rbusObject_t inParams,
+                                        rbusMethodAsyncRespHandler_t callback, int timeout,
+                                        void *userData)
+{
+        if(!isRbusInitialized())
+        {
+                WalError("Rbus not initialized in webpaRbusMethodInvokeAsync\n");
+                return RBUS_ERROR_NOT_INITIALIZED;
+        }
+        if(methodName == NULL || callback == NULL)
+        {
+                WalError("Invalid arguments to webpaRbusMethodInvokeAsync\n");
+                return RBUS_ERROR_INVALID_INPUT;
+        }
+        WalInfo("RBUS method invoke to %s asynchronously\n", methodName);
+        return rbusMethod_InvokeAsync(rbus_handle, methodName, inParams, callback, timeout, userData);
+}
+

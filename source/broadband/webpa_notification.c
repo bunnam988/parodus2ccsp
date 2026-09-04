@@ -1597,6 +1597,44 @@ void processNotification(NotifyData *notifyData)
 				WAL_FREE(cid);
 			}
 				break;
+
+		case METHOD_ASYNC_RESPONSE:
+			{
+				MethodAsyncResponse *mr = notifyData->u.methodResp;
+				if(mr == NULL || mr->rspDestination == NULL || mr->resultPayload == NULL)
+				{
+					WalError("METHOD_ASYNC_RESPONSE: invalid data, dropping\n");
+					free(dest);
+					cJSON_Delete(notifyPayload);
+					/* sendNotification was never called here, so resultPayload was
+					 * never transferred; free it explicitly before freeNotifyMessage. */
+					if(mr != NULL)
+						WAL_FREE(mr->resultPayload);
+					freeNotifyMessage(notifyData);
+					return;
+				}
+				WalInfo("METHOD_ASYNC_RESPONSE: method=%s dest=%s\n",
+					mr->methodName ? mr->methodName : "<null>", mr->rspDestination);
+				source = (char*) malloc(sizeof(char) * sizeof(device_id));
+				if(source != NULL)
+				{
+					walStrncpy(source, device_id, sizeof(device_id));
+					/* sendNotification takes ownership of mr->resultPayload and source;
+					 * both are freed internally via wrp_free_struct. Do not free them again. */
+					sendNotification(mr->resultPayload, source, mr->rspDestination);
+				}
+				else
+				{
+					WalError("METHOD_ASYNC_RESPONSE: source malloc failed, dropping notification for %s\n",
+						mr->methodName ? mr->methodName : "<null>");
+					WAL_FREE(mr->resultPayload);
+				}
+				free(dest);
+				cJSON_Delete(notifyPayload);
+				freeNotifyMessage(notifyData);
+				return;
+			}
+
 	        	default:
 	        		break;
 	        }
@@ -2093,6 +2131,17 @@ static void freeNotifyMessage(NotifyData *notifyData)
 			}
 			WalPrint("Free notifyData->u.notify\n");
 			WAL_FREE(notifyData->u.notify);
+		}
+	}
+	else if(notifyData->type == METHOD_ASYNC_RESPONSE)
+	{
+		if(notifyData->u.methodResp != NULL)
+		{
+			/* resultPayload ownership was transferred to sendNotification (freed
+			 * via wrp_free_struct); do not free it again here. */
+			WAL_FREE(notifyData->u.methodResp->methodName);
+			WAL_FREE(notifyData->u.methodResp->rspDestination);
+			WAL_FREE(notifyData->u.methodResp);
 		}
 	}
 

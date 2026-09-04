@@ -81,8 +81,16 @@ typedef enum
     DEVICE_STATUS,
     FACTORY_RESET,
     FIRMWARE_UPGRADE,
-    PARAM_NOTIFY_RETRY
+    PARAM_NOTIFY_RETRY,
+    METHOD_ASYNC_RESPONSE
 } NOTIFY_TYPE;
+
+typedef struct
+{
+    char *methodName;
+    char *rspDestination;
+    char *resultPayload;
+} MethodAsyncResponse;
 
 typedef struct
 {
@@ -92,6 +100,7 @@ typedef struct
     	TransData * status;
         NodeData * node;
         DeviceStatus *device;
+        MethodAsyncResponse *methodResp;
     } u;
 } NotifyData;
 

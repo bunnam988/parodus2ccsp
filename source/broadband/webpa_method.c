@@ -6,10 +6,12 @@
  *              a single reserved parameter named RDK.Operate (dataType 5,
  *              WDMP_BASE64) whose value is a Base64-encoded UTF-8 JSON operate
  *              payload: { "method": "...", "params": { ... },
- *              "rspDestination": "..." }. The target RDK
+ *              "rspDestination": "..." }. When rspDestination is absent the
  *              method is invoked synchronously via rbusMethod_Invoke and the
- *              result (or error) is returned to the cloud using the method
- *              response shape.
+ *              result is returned directly in the HTTP response.  When
+ *              rspDestination is present the method is dispatched asynchronously
+ *              via rbusMethod_InvokeAsync; WebPA immediately ACKs the cloud and
+ *              later delivers the provider result as a WRP event notification.
  *
  * Copyright (c) 2026  Comcast
  */
@@ -19,6 +21,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
+#include <errno.h>
 
 #include <cJSON.h>
 #include <trower-base64/base64.h>
@@ -26,6 +30,7 @@
 #include "webpa_method.h"
 #include "webpa_adapter.h"
 #include "webpa_rbus.h"
+#include "webpa_notification.h"
 
 /*----------------------------------------------------------------------------*/
 /*                             Function Prototypes                            */
@@ -48,7 +53,34 @@ static void dumpRbusObjectWithTimestamp(const char *path, const char *label,
 #endif                
 static int parseOperatePayload(set_req_t *setReq,
                 char **methodName,
-                rbusObject_t *inParams, bool *isAsync, char **errorObj);
+                rbusObject_t *inParams, bool *isAsync,
+                char **rspDestination, char **errorObj);
+
+/* Async method handling */
+static void enqueueMethodResponse(MethodAsyncResponse *resp);
+static MethodAsyncResponse *dequeueMethodResponse(void);
+static int handleAsyncMethodInvoke(const char *methodName, const char *rspDestination,
+                                    rbusObject_t inParams, res_struct *resObj,
+                                    char **errorObj);
+static void webpaAsyncMethodCallback(rbusHandle_t handle, char const *methodName,
+                                      rbusError_t error, rbusObject_t outParams,
+                                      void *userData);
+static void *methodAsyncResponseConsumer(void *arg);
+
+#define METHOD_ASYNC_TIMEOUT_SEC        1800  /* 30 minutes; passed to rbusMethod_InvokeAsync */
+
+/*----------------------------------------------------------------------------*/
+/*                         Async state – response queue                       */
+/*----------------------------------------------------------------------------*/
+typedef struct MethodRespMsg {
+        MethodAsyncResponse    *resp;
+        struct MethodRespMsg   *next;
+} MethodRespMsg;
+
+static MethodRespMsg   *s_methodRespQ     = NULL;
+static pthread_mutex_t  s_methodRespMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t   s_methodRespCond  = PTHREAD_COND_INITIALIZER;
+
 /*----------------------------------------------------------------------------*/
 /*                             External Functions                             */
 /*----------------------------------------------------------------------------*/
@@ -66,6 +98,7 @@ void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
 {
         const char *responseName = RDK_OPERATE_PARAM;
         char *methodName = NULL;
+        char *rspDestination = NULL;
         char *errorObj = NULL;
         char *resultStr = NULL;
         char *b64message = NULL;
@@ -80,7 +113,7 @@ void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
 
         /* Validate and parse the operate payload into method name and input params. */
         if(parseOperatePayload(setReq, &methodName,
-                              &inParams, &isAsync, &errorObj) != 0)
+                              &inParams, &isAsync, &rspDestination, &errorObj) != 0)
         {
                 goto respond;
         }
@@ -88,9 +121,19 @@ void handleMethodInvoke(set_req_t *setReq, res_struct *resObj)
 
         if(isAsync)
         {
-                WalError("Async method invocation is not supported\n");
-                errorObj = buildErrorObject(METHOD_ERR_INVALID_REQUEST,
-                        "The async request is not supported");
+                int asyncRet = handleAsyncMethodInvoke(responseName, rspDestination,
+                                                        inParams, resObj, &errorObj);
+                WAL_FREE(rspDestination);
+                if(asyncRet == 0)
+                {
+                        /* resObj already populated with ACK; release remaining locals */
+                        WAL_FREE(methodName);
+                        if(inParams != NULL)
+                                rbusObject_Release(inParams);
+                        WalPrint("************** handleMethodInvoke (async ACK sent) *****************\n");
+                        return;
+                }
+                /* Async invoke failed; errorObj is set; fall through to respond */
                 goto respond;
         }
 
@@ -255,6 +298,7 @@ respond:
 
         WAL_FREE(errorObj);
         WAL_FREE(methodName);
+        WAL_FREE(rspDestination);
         WAL_FREE(resultStr);
         if(resultObj != NULL)
         {
@@ -284,7 +328,8 @@ respond:
  */
 static int parseOperatePayload(set_req_t *setReq,
                 char **methodName,
-                rbusObject_t *inParams, bool *isAsync, char **errorObj)
+                rbusObject_t *inParams, bool *isAsync,
+                char **rspDestination, char **errorObj)
 {
         char *decoded = NULL;
         size_t decodedLen = 0;
@@ -292,7 +337,7 @@ static int parseOperatePayload(set_req_t *setReq,
         cJSON *methodItem = NULL;
         cJSON *paramsItem = NULL;
         cJSON *rspDestinationItem = NULL;
-        const char *rspDestination = NULL;
+        const char *rspDest = NULL;
         param_t *p = NULL;
 
         /* A method request carries exactly one RDK.Operate parameter. */
@@ -382,6 +427,7 @@ static int parseOperatePayload(set_req_t *setReq,
         /* Optional rspDestination controls invocation mode. When provided,
          * the request is asynchronous. */
         *isAsync = false;
+        *rspDestination = NULL;
         rspDestinationItem = cJSON_GetObjectItem(operateJson, "rspDestination");
         if(rspDestinationItem != NULL)
         {
@@ -393,15 +439,379 @@ static int parseOperatePayload(set_req_t *setReq,
                         cJSON_Delete(operateJson);
                         return -1;
                 }
-                rspDestination = rspDestinationItem->valuestring;
-                if(rspDestination[0] != '\0')
+                rspDest = rspDestinationItem->valuestring;
+                if(rspDest[0] != '\0')
                 {
                         *isAsync = true;
+                        *rspDestination = strdup(rspDest);
+                        if(*rspDestination == NULL)
+                        {
+                                WalError("Failed to allocate memory for rspDestination\n");
+                                *errorObj = buildErrorObject(METHOD_ERR_INTERNAL,
+                                        "Failed to allocate memory for rspDestination");
+                                cJSON_Delete(operateJson);
+                                return -1;
+                        }
                 }
         }
 
         cJSON_Delete(operateJson);
         return 0;
+}
+
+/*----------------------------------------------------------------------------*/
+/*                         Async state – pending request context              */
+/*----------------------------------------------------------------------------*/
+
+/* Carries the cloud correlation context through to the rbus async callback. */
+typedef struct PendingAsyncReq {
+        char     *methodName;
+        char     *rspDestination;
+} PendingAsyncReq;
+
+/*----------------------------------------------------------------------------*/
+/*                         Async response queue                               */
+/*----------------------------------------------------------------------------*/
+
+static void enqueueMethodResponse(MethodAsyncResponse *resp)
+{
+        MethodRespMsg *msg = (MethodRespMsg *) malloc(sizeof(MethodRespMsg));
+        if(msg == NULL)
+        {
+                WalError("enqueueMethodResponse: malloc failed\n");
+                return;
+        }
+        msg->resp = resp;
+        msg->next = NULL;
+
+        pthread_mutex_lock(&s_methodRespMutex);
+        if(s_methodRespQ == NULL)
+        {
+                s_methodRespQ = msg;
+        }
+        else
+        {
+                MethodRespMsg *tail = s_methodRespQ;
+                while(tail->next != NULL) tail = tail->next;
+                tail->next = msg;
+        }
+        WalInfo("Enqueued async method response for %s\n",
+                resp && resp->methodName ? resp->methodName : "<null>");
+        pthread_cond_signal(&s_methodRespCond);
+        pthread_mutex_unlock(&s_methodRespMutex);
+}
+
+/* Blocks until a response is available; caller owns the returned pointer. */
+static MethodAsyncResponse *dequeueMethodResponse(void)
+{
+        MethodRespMsg *msg;
+        MethodAsyncResponse *resp;
+
+        pthread_mutex_lock(&s_methodRespMutex);
+        while(s_methodRespQ == NULL)
+                pthread_cond_wait(&s_methodRespCond, &s_methodRespMutex);
+        msg           = s_methodRespQ;
+        s_methodRespQ = msg->next;
+        pthread_mutex_unlock(&s_methodRespMutex);
+
+        resp = msg->resp;
+        free(msg);
+        return resp;
+}
+
+/*----------------------------------------------------------------------------*/
+/*                         RBUS async callback                                */
+/*----------------------------------------------------------------------------*/
+
+static void webpaAsyncMethodCallback(rbusHandle_t handle, char const *methodName,
+                                      rbusError_t error, rbusObject_t outParams,
+                                      void *userData)
+{
+        (void) handle;
+        MethodAsyncResponse *resp = NULL;
+        PendingAsyncReq    *pending = (PendingAsyncReq *) userData;
+        cJSON *payloadJson        = NULL;
+        char *resultPayload       = NULL;
+
+        WalInfo("webpaAsyncMethodCallback: method=%s error=%d\n",
+                methodName != NULL ? methodName : "<null>", error);
+
+        if(methodName == NULL)
+        {
+                WalError("webpaAsyncMethodCallback: NULL method name in callback\n");
+                if(pending != NULL)
+                {
+                        WAL_FREE(pending->methodName);
+                        WAL_FREE(pending->rspDestination);
+                        WAL_FREE(pending);
+                }
+                return;
+        }
+
+        if(pending == NULL)
+        {
+                WalError("webpaAsyncMethodCallback: NULL userData for %s\n", methodName);
+                return;
+        }
+
+        if(error != RBUS_ERROR_SUCCESS)
+        {
+                int         code   = mapRbusErrorToMethodError(error);
+                const char *detail = rbusError_ToString(error);
+                char        msg[256] = {'\0'};
+                cJSON      *errInner, *errObj;
+
+                snprintf(msg, sizeof(msg), "RBUS error: %s",
+                         (detail != NULL && detail[0] != '\0') ? detail : "unknown");
+                WalError("webpaAsyncMethodCallback: method '%s' failed: %s\n", methodName, msg);
+
+                errObj   = cJSON_CreateObject();
+                errInner = cJSON_CreateObject();
+                cJSON_AddNumberToObject(errInner, "code", code);
+                if(outParams != NULL)
+                {
+                        cJSON *outJson = cJSON_CreateObject();
+                        if(rbusObjectToJson(outParams, outJson) == 0)
+                                cJSON_AddItemToObject(errInner, "data", outJson);
+                        else
+                        {
+                                cJSON_Delete(outJson);
+                                cJSON_AddStringToObject(errInner, "data", msg);
+                        }
+                }
+                else
+                {
+                        cJSON_AddStringToObject(errInner, "data", msg);
+                }
+                cJSON_AddItemToObject(errObj, "error", errInner);
+                payloadJson = errObj;
+        }
+        else
+        {
+                cJSON *resultObj    = cJSON_CreateObject();
+                cJSON *resultWrapper = cJSON_CreateObject();
+
+                if(outParams != NULL && rbusObjectToJson(outParams, resultObj) != 0)
+                {
+                        WalError("webpaAsyncMethodCallback: rbusObjectToJson failed for %s\n",
+                                 methodName);
+                        cJSON_Delete(resultObj);
+                        resultObj = cJSON_CreateObject();
+                }
+                cJSON_AddItemToObject(resultWrapper, "result", resultObj);
+                payloadJson = resultWrapper;
+                WalInfo("webpaAsyncMethodCallback: method '%s' succeeded\n", methodName);
+        }
+
+        /* WRP event payload is the raw result/error JSON per spec */
+        resultPayload = cJSON_PrintUnformatted(payloadJson);
+        cJSON_Delete(payloadJson);
+
+        if(resultPayload == NULL)
+        {
+                WalError("webpaAsyncMethodCallback: failed to serialize payload for %s\n", methodName);
+                WAL_FREE(pending->rspDestination);
+                WAL_FREE(pending->methodName);
+                WAL_FREE(pending);
+                return;
+        }
+
+        resp = (MethodAsyncResponse *) malloc(sizeof(MethodAsyncResponse));
+        if(resp == NULL)
+        {
+                WalError("webpaAsyncMethodCallback: malloc failed\n");
+                WAL_FREE(pending->rspDestination);
+                WAL_FREE(pending->methodName);
+                WAL_FREE(pending);
+                WAL_FREE(resultPayload);
+                return;
+        }
+        resp->methodName     = pending->methodName;
+        resp->rspDestination = pending->rspDestination;
+        resp->resultPayload  = resultPayload;
+        free(pending); /* fields ownership transferred to resp */
+
+        enqueueMethodResponse(resp);
+}
+
+/*----------------------------------------------------------------------------*/
+/*                      Async response consumer thread                        */
+/*----------------------------------------------------------------------------*/
+
+static void *methodAsyncResponseConsumer(void *arg)
+{
+        (void) arg;
+        pthread_detach(pthread_self());
+        WalInfo("methodAsyncResponseConsumer thread started\n");
+
+        while(1)
+        {
+                MethodAsyncResponse *resp = dequeueMethodResponse();
+                if(resp == NULL) continue;
+
+                /* Validate before dispatching */
+                if(resp->rspDestination == NULL || resp->rspDestination[0] == '\0')
+                {
+                        WalError("methodAsyncResponseConsumer: missing rspDestination for %s\n",
+                                 resp->methodName ? resp->methodName : "<null>");
+                        WAL_FREE(resp->methodName);
+                        WAL_FREE(resp->rspDestination);
+                        WAL_FREE(resp->resultPayload);
+                        WAL_FREE(resp);
+                        continue;
+                }
+                if(resp->resultPayload == NULL || resp->resultPayload[0] == '\0')
+                {
+                        WalError("methodAsyncResponseConsumer: missing resultPayload for %s\n",
+                                 resp->methodName ? resp->methodName : "<null>");
+                        WAL_FREE(resp->methodName);
+                        WAL_FREE(resp->rspDestination);
+                        WAL_FREE(resp->resultPayload);
+                        WAL_FREE(resp);
+                        continue;
+                }
+
+                WalInfo("methodAsyncResponseConsumer: dispatching response for %s -> %s\n",
+                        resp->methodName, resp->rspDestination);
+
+                notifyCB cb = (notifyCB) getNotifyCB();
+                if(cb == NULL)
+                {
+                        WalError("methodAsyncResponseConsumer: notifyCB not registered, dropping response for %s\n",
+                                 resp->methodName);
+                        WAL_FREE(resp->methodName);
+                        WAL_FREE(resp->rspDestination);
+                        WAL_FREE(resp->resultPayload);
+                        WAL_FREE(resp);
+                        continue;
+                }
+
+                NotifyData *notifyData = (NotifyData *) malloc(sizeof(NotifyData));
+                if(notifyData == NULL)
+                {
+                        WalError("methodAsyncResponseConsumer: malloc failed for NotifyData\n");
+                        WAL_FREE(resp->methodName);
+                        WAL_FREE(resp->rspDestination);
+                        WAL_FREE(resp->resultPayload);
+                        WAL_FREE(resp);
+                        continue;
+                }
+                memset(notifyData, 0, sizeof(NotifyData));
+                notifyData->type         = METHOD_ASYNC_RESPONSE;
+                notifyData->u.methodResp = resp;
+
+                cb(notifyData);
+        }
+        return NULL;
+}
+
+/*----------------------------------------------------------------------------*/
+/*                      handleAsyncMethodInvoke                               */
+/*----------------------------------------------------------------------------*/
+
+static int handleAsyncMethodInvoke(const char *methodName, const char *rspDestination,
+                                    rbusObject_t inParams, res_struct *resObj,
+                                    char **errorObj)
+{
+        rbusError_t rc;
+        char *b64ack = NULL;
+
+        /* Allocate correlation context; rbus delivers it back in the callback. */
+        PendingAsyncReq *pending = (PendingAsyncReq *) malloc(sizeof(PendingAsyncReq));
+        if(pending == NULL)
+        {
+                WalError("handleAsyncMethodInvoke: malloc failed\n");
+                *errorObj = buildErrorObject(METHOD_ERR_INTERNAL, "Memory allocation failed");
+                return -1;
+        }
+        pending->methodName     = strdup(methodName);
+        pending->rspDestination = rspDestination ? strdup(rspDestination) : NULL;
+
+        if(pending->methodName == NULL || (rspDestination != NULL && pending->rspDestination == NULL))
+        {
+                WalError("handleAsyncMethodInvoke: strdup failed for %s\n", methodName);
+                WAL_FREE(pending->methodName);
+                WAL_FREE(pending->rspDestination);
+                WAL_FREE(pending);
+                *errorObj = buildErrorObject(METHOD_ERR_INTERNAL, "Memory allocation failed");
+                return -1;
+        }
+
+        /* Pass METHOD_ASYNC_TIMEOUT_SEC as rbus's own transport timeout; if the
+         * provider crashes/deadlocks, rbus itself calls back with RBUS_ERROR_TIMEOUT. */
+        rc = webpaRbusMethodInvokeAsync(methodName, inParams, webpaAsyncMethodCallback,
+                                         METHOD_ASYNC_TIMEOUT_SEC, pending);
+        if(rc != RBUS_ERROR_SUCCESS)
+        {
+                WAL_FREE(pending->methodName);
+                WAL_FREE(pending->rspDestination);
+                WAL_FREE(pending);
+
+                int         code   = mapRbusErrorToMethodError(rc);
+                const char *detail = rbusError_ToString(rc);
+                char        msg[256] = {'\0'};
+                snprintf(msg, sizeof(msg), "RBUS async invoke error: %s",
+                         (detail != NULL && detail[0] != '\0') ? detail : "unknown");
+                WalError("handleAsyncMethodInvoke: %s for %s\n", msg, methodName);
+                *errorObj = buildErrorObject(code, msg);
+                return -1;
+        }
+
+        /* ACK: base64({"rspDestination":"<dest>"}) — echoes caller's destination back */
+        char ackJson[512] = {'\0'};
+        snprintf(ackJson, sizeof(ackJson), "{\"rspDestination\":\"%s\"}",
+                 rspDestination ? rspDestination : "");
+        b64ack = base64Encode(ackJson);
+
+        if(resObj != NULL)
+        {
+                resObj->reqType  = METHOD;
+                resObj->paramCnt = 1;
+
+                if(resObj->retStatus == NULL)
+                        resObj->retStatus = (WDMP_STATUS *) malloc(sizeof(WDMP_STATUS));
+                if(resObj->retStatus != NULL)
+                        resObj->retStatus[0] = WDMP_SUCCESS;
+
+                if(resObj->u.paramRes == NULL)
+                {
+                        resObj->u.paramRes = (param_res_t *) malloc(sizeof(param_res_t));
+                        if(resObj->u.paramRes != NULL)
+                                memset(resObj->u.paramRes, 0, sizeof(param_res_t));
+                }
+                if(resObj->u.paramRes != NULL && resObj->u.paramRes->params == NULL)
+                {
+                        resObj->u.paramRes->params = (param_t *) malloc(sizeof(param_t));
+                        if(resObj->u.paramRes->params != NULL)
+                                memset(resObj->u.paramRes->params, 0, sizeof(param_t));
+                }
+                if(resObj->u.paramRes != NULL && resObj->u.paramRes->params != NULL)
+                {
+                        resObj->u.paramRes->params[0].name  = strdup(methodName);
+                        resObj->u.paramRes->params[0].value = b64ack;
+                        resObj->u.paramRes->params[0].type  = WDMP_BASE64;
+                        b64ack = NULL; /* ownership transferred */
+                }
+        }
+        WAL_FREE(b64ack);
+
+        WalInfo("handleAsyncMethodInvoke: ACK sent for async method %s -> %s\n",
+                methodName, rspDestination);
+        return 0;
+}
+
+/*----------------------------------------------------------------------------*/
+/*                         Public init function                               */
+/*----------------------------------------------------------------------------*/
+
+void initMethodAsyncThread(void)
+{
+        pthread_t tid;
+        int err = pthread_create(&tid, NULL, methodAsyncResponseConsumer, NULL);
+        if(err != 0)
+                WalError("initMethodAsyncThread: consumer thread failed: %s\n", strerror(err));
+        else
+                WalInfo("initMethodAsyncThread: methodAsyncResponseConsumer started\n");
 }
 
 /*----------------------------------------------------------------------------*/
@@ -518,7 +928,7 @@ static char *buildErrorObjectFromJson(int code, cJSON *dataObj)
  *        message is the Base64-encoded result/error object.
  *
  * @param[in] name       invoked method name (or RDK.Operate if unknown)
- * @param[in] statusCode WDMP_SUCCESS on success, WDMP_FAILURE on failure
+ * @param[in] statusCode METHOD_STATUS_OK (200) on success, METHOD_STATUS_FAILURE (520) on failure
  * @param[in] messageObj result/error cJSON object (not consumed)
  * @return newly-allocated payload string (caller frees)
  */

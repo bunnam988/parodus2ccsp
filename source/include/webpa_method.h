@@ -26,6 +26,10 @@
 #define METHOD_ERR_INVALID_PARAMS          (-32602)
 #define METHOD_ERR_INTERNAL                (-32603)
 
+/* Outer statusCode in the method response/event payload (HTTP-like). */
+#define METHOD_STATUS_OK                   200
+#define METHOD_STATUS_FAILURE              520
+
 /**
  * @brief isMethodInvokeRequest detects whether a SET request should be routed
  *        to method-invocation handling.
@@ -47,5 +51,14 @@ bool isMethodInvokeRequest(set_req_t *setReq);
  * @param[out] resObj response structure to be populated
  */
 void handleMethodInvoke(set_req_t *setReq, res_struct *resObj);
+
+/**
+ * @brief initMethodAsyncThread starts the background consumer thread that
+ *        drains the async method response queue and dispatches each completed
+ *        response to the notification subsystem.
+ *
+ * Must be called once during startup, after initNotifyTask().
+ */
+void initMethodAsyncThread(void);
 
 #endif

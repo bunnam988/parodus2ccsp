@@ -10,6 +10,7 @@
 #include "webpa_adapter.h"
 #include "libpd.h"
 #include "webpa_rbus.h"
+#include "webpa_method.h"
 #ifdef FEATURE_SUPPORT_WEBCONFIG
 #include <curl/curl.h>
 #endif
@@ -72,6 +73,7 @@ int main()
 	// Initialize Apply WiFi Settings handler
 	initApplyWiFiSettings();
 	initNotifyTask(ret);
+	initMethodAsyncThread();
 #ifdef FEATURE_SUPPORT_WEBCONFIG
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
